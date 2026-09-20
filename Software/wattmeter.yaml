@@ -1,0 +1,133 @@
+esphome:
+  name: wattmeter
+  friendly_name: WattMeter
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: "DZL+jjuRa49RtFxtcrdrWpNDa0DnA/3jFO9xccQOM7c="
+  reboot_timeout: 0s
+  max_connections: 1
+
+ota:
+  - platform: esphome
+    password: !secret wattmeter__ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: WattMeter
+    password: "B1sseizQIVfg"
+  fast_connect: true
+  reboot_timeout: 0s
+  power_save_mode: NONE
+
+captive_portal:
+  id: captive
+  compression: gzip
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+  compression: gzip
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+
+preferences:
+  flash_write_interval: 3h
+  
+globals:
+  - id: weekly_accumulated
+    type: float
+    initial_value: '0.0'
+    restore_value: yes
+  - id: last_daily_reading
+    type: float
+    initial_value: '0.0'
+    restore_value: yes
+
+ads1115:
+  - address: 0x48
+    continuous_mode: true
+    id: ads1115_bus_0x48
+sensor:
+  - platform: ads1115
+    ads1115_id: ads1115_bus_0x48
+    multiplexer: 'A0_A3'
+    gain: 2.048
+    id: ads_a0
+    internal: true
+  - platform: ct_clamp
+    sensor: ads_a0
+    name: "Текущее потребление"
+    update_interval: 5s
+    sample_duration: 1s
+    accuracy_decimals: 0
+    unit_of_measurement: "Вт"
+    id: power_watts
+    filters:
+      - calibrate_linear:
+        - 0.0 -> 0.0
+        - 1.0 -> 50.0
+      - multiply: 230.0
+  - platform: total_daily_energy
+    id: daily_energy
+    name: 'С начала суток'
+    power_id: power_watts
+    unit_of_measurement: 'кВт*ч'
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 1
+    restore: true
+    filters:
+      - multiply: 0.001
+  - platform: template
+    name: "С начала недели"
+    id: weekly_energy
+    unit_of_measurement: "кВт*ч"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 1
+    update_interval: 5s
+    lambda: |-
+      float current_daily = id(daily_energy).state;
+      
+      if (!isnan(current_daily)) {
+        if (current_daily >= id(last_daily_reading)) {
+          id(weekly_accumulated) += (current_daily - id(last_daily_reading));
+        } else {
+          id(weekly_accumulated) += current_daily;
+        }
+        id(last_daily_reading) = current_daily;
+      }
+      // On boot, this returns the restored value from the flash storage
+      return id(weekly_accumulated);
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: UTC
+    on_time:
+      - cron: "59 59 23 * * SUN"
+        then:
+          - lambda: |-
+              id(weekly_accumulated) = 0;
+              id(weekly_energy).publish_state(0.0);
+              global_preferences->sync();
